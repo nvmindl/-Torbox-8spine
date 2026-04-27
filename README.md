@@ -1,61 +1,27 @@
 # 8spine TorBox Module
 
-An 8spine module that uses **Prowlarr** and **Jackett** as fallback search sources, then uses **TorBox** for playback.
+An 8spine module that uses Prowlarr and Jackett as fallback for music search, streamed through TorBox.
 
-Files:
+## Add to 8spine
 
-- `8spine-torbox-module.js`
-
-## Flow
-
-1. 8spine calls `searchTracks(query, limit)`
-2. The module searches **Prowlarr** first using Torznab `t=music`
-3. If Prowlarr returns no usable magnet results, it falls back to **Jackett**
-4. When a track is selected, the module adds the magnet to **TorBox**
-5. The module polls TorBox until an audio file is available
-6. The module returns a direct `requestdl` URL to 8spine
-
-## Install
-
-Add this repo to 8spine:
+Paste this into 8spine and enter your TorBox API key:
 
 `https://github.com/nvmindl/8spine-torbox-torznab-module`
 
-Then enter your TorBox API key.
-
-## Required config
-
-The module needs:
-
-- `torboxApiKey`
-- `prowlarrTorznabUrl`
-- `prowlarrApiKey`
-- `jackettTorznabUrl`
-- `jackettApiKey`
-
-## Config methods
-
-The module accepts config through:
-
-1. `setConfig({...})`
-2. `configure({...})`
-3. `globalThis.__EIGHTSPINE_MODULE_CONFIG__['torbox-torznab']`
-
-Example:
+## Config
 
 ```js
 module.configure({
-  torboxApiKey: 'TORBOX_KEY',
+  torboxApiKey: 'your-torbox-key',
   prowlarrTorznabUrl: 'http://localhost:9696/1/api',
-  prowlarrApiKey: 'PROWLARR_KEY',
+  prowlarrApiKey: 'your-prowlarr-key',
   jackettTorznabUrl: 'http://localhost:9117/api/v2.0/indexers/all/results/torznab/api',
-  jackettApiKey: 'JACKETT_KEY'
+  jackettApiKey: 'your-jackett-key'
 });
 ```
 
-## Notes
+## How it works
 
-- The module currently searches with Torznab `t=music` and category `3000` by default.
-- Some indexers return better music metadata than others, so title parsing is best-effort.
-- If TorBox has to fetch an uncached torrent, playback may take time because the module waits for a real audio file before returning the stream URL.
-- The current wait timeout is 90 seconds by default.
+1. Searches Prowlarr first, falls back to Jackett if nothing comes back
+2. Sends the magnet to TorBox
+3. Waits for an audio file, then returns the stream URL to 8spine
