@@ -1,5 +1,6 @@
 const MODULE_ID = 'torbox-torznab';
 const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
+const TORBOX_LOGO = 'https://avatars.githubusercontent.com/u/144096078?s=280&v=4';
 const AUDIO_EXTENSIONS = ['flac', 'wav', 'aiff', 'alac', 'ape', 'm4a', 'aac', 'mp3', 'ogg', 'opus'];
 
 let runtimeConfig = {
@@ -16,17 +17,27 @@ let runtimeConfig = {
 };
 
 function getConfig() {
-  const globalConfig =
+  var globalConfig =
     (typeof globalThis !== 'undefined' &&
       globalThis.__EIGHTSPINE_MODULE_CONFIG__ &&
       globalThis.__EIGHTSPINE_MODULE_CONFIG__[MODULE_ID]) ||
     {};
-  return { ...runtimeConfig, ...globalConfig };
+  return Object.assign({}, runtimeConfig, globalConfig);
 }
 
 function setConfig(nextConfig) {
-  runtimeConfig = { ...runtimeConfig, ...(nextConfig || {}) };
+  runtimeConfig = Object.assign({}, runtimeConfig, nextConfig || {});
   return runtimeConfig;
+}
+
+function getKey(context) {
+  // Try module-level setting first, then global debrid key
+  var setting = context && context.settings && context.settings.torboxApiKey;
+  var fromSetting = setting && typeof setting === 'object' ? setting.value : setting;
+  if (fromSetting && fromSetting.trim()) return fromSetting.trim();
+  if (context && context.debridApiKey) return context.debridApiKey;
+  var cfg = getConfig();
+  return cfg.torboxApiKey || '';
 }
 
 function sleep(ms) {
@@ -53,29 +64,52 @@ function decodeXml(value) {
     .replace(/&apos;/g, "'");
 }
 
-function ensureTorboxApiKey() {
-  var apiKey =
-    getConfig().torboxApiKey ||
-    (typeof globalThis !== 'undefined' ? globalThis.TORBOX_API_KEY : '');
-  if (!apiKey) throw new Error('TorBox API key is missing.');
-  return apiKey;
+// ============================================================================
+// TORBOX ACCOUNT VERIFICATION
+// ============================================================================
+
+async function verifyTorBoxKey(apiKey) {
+  try {
+    var response = await fetch(TORBOX_API_BASE + '/user/me', {
+      method: 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + apiKey,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    var data = await response.json();
+
+    if (!response.ok || !data.success) {
+      return { success: false, error: data.detail || 'Invalid API key' };
+    }
+
+    var userData = data.data || data;
+    var planMap = { 0: 'Free', 1: 'Essential', 2: 'Pro', 3: 'Standard' };
+
+    return {
+      success: true,
+      accountName: userData.email || userData.username || 'TorBox User',
+      plan: planMap[userData.plan] || ('Plan ' + userData.plan),
+      expiry: userData.premium_expires_at
+        ? new Date(userData.premium_expires_at).toLocaleDateString()
+        : 'Never'
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 }
 
-function ensureTorznabSourceConfig(source) {
-  var config = getConfig();
-  var url = config[source + 'TorznabUrl'];
-  var apiKey = config[source + 'ApiKey'];
-  if (!url) throw new Error(source + ' Torznab URL is missing.');
-  return { url: url, apiKey: apiKey };
-}
+// ============================================================================
+// TORBOX API HELPERS
+// ============================================================================
 
-async function torboxFetch(path, options) {
-  var apiKey = ensureTorboxApiKey();
+async function torboxFetch(path, options, apiKey) {
   var opts = options || {};
   var response = await fetch(TORBOX_API_BASE + path, {
     method: opts.method || 'GET',
     body: opts.body || undefined,
-    headers: Object.assign({ Authorization: 'Bearer ' + apiKey }, opts.headers || {})
+    headers: Object.assign({ 'Authorization': 'Bearer ' + apiKey }, opts.headers || {})
   });
   var payload = await response.json();
   if (!response.ok || payload.success === false) {
@@ -84,7 +118,7 @@ async function torboxFetch(path, options) {
   return payload.data;
 }
 
-async function torboxCreateTorrent(magnet, name) {
+async function torboxCreateTorrent(magnet, name, apiKey) {
   var body = new FormData();
   body.append('magnet', magnet);
   body.append('name', name || '8spine request');
@@ -92,8 +126,12 @@ async function torboxCreateTorrent(magnet, name) {
   body.append('allow_zip', 'false');
   body.append('as_queued', 'false');
   body.append('add_only_if_cached', 'false');
-  return torboxFetch('/torrents/createtorrent', { method: 'POST', body: body });
+  return torboxFetch('/torrents/createtorrent', { method: 'POST', body: body }, apiKey);
 }
+
+// ============================================================================
+// TORZNAB SEARCH (PROWLARR / JACKETT)
+// ============================================================================
 
 function appendParams(baseUrl, params) {
   var url = new URL(baseUrl);
@@ -134,7 +172,6 @@ function isAudioName(name) {
 
 function parseSearchResultItem(itemXml, source) {
   var title = getField(itemXml, 'title');
-  var guid = getField(itemXml, 'guid');
   var link = getField(itemXml, 'link');
   var infoHash = getAttrValue(itemXml, 'infohash').toUpperCase();
   var magnetUrl = getAttrValue(itemXml, 'magneturl');
@@ -148,7 +185,7 @@ function parseSearchResultItem(itemXml, source) {
     (link.startsWith('magnet:') ? link : '') ||
     (infoHash ? 'magnet:?xt=urn:btih:' + encodeURIComponent(infoHash) + '&dn=' + encodeURIComponent(title) : '');
 
-  return { source: source, title: title, guid: guid, link: link, infoHash: infoHash, magnetUrl: resolvedMagnet, seeders: seeders, size: size };
+  return { source: source, title: title, link: link, infoHash: infoHash, magnetUrl: resolvedMagnet, seeders: seeders, size: size };
 }
 
 function parseTorznabResults(xml, source) {
@@ -156,21 +193,39 @@ function parseTorznabResults(xml, source) {
   return items.map(function (itemXml) { return parseSearchResultItem(itemXml, source); });
 }
 
-async function queryTorznabSource(source, query, limit) {
-  var cfg = ensureTorznabSourceConfig(source);
-  var url = appendParams(cfg.url, {
-    apikey: cfg.apiKey || undefined,
+async function queryTorznabSource(source, query, limit, context) {
+  var cfg = getConfig();
+
+  // Allow context settings to override config
+  var url, apiKey;
+  if (source === 'prowlarr') {
+    var prowlarrSetting = context && context.settings && context.settings.prowlarrTorznabUrl;
+    url = (prowlarrSetting && typeof prowlarrSetting === 'object' ? prowlarrSetting.value : prowlarrSetting) || cfg.prowlarrTorznabUrl;
+    var prowlarrKeySetting = context && context.settings && context.settings.prowlarrApiKey;
+    apiKey = (prowlarrKeySetting && typeof prowlarrKeySetting === 'object' ? prowlarrKeySetting.value : prowlarrKeySetting) || cfg.prowlarrApiKey;
+  } else {
+    var jackettSetting = context && context.settings && context.settings.jackettTorznabUrl;
+    url = (jackettSetting && typeof jackettSetting === 'object' ? jackettSetting.value : jackettSetting) || cfg.jackettTorznabUrl;
+    var jackettKeySetting = context && context.settings && context.settings.jackettApiKey;
+    apiKey = (jackettKeySetting && typeof jackettKeySetting === 'object' ? jackettKeySetting.value : jackettKeySetting) || cfg.jackettApiKey;
+  }
+
+  if (!url) throw new Error(source + ' URL is not configured.');
+
+  var searchUrl = appendParams(url, {
+    apikey: apiKey || undefined,
     t: 'music',
     q: query,
-    cat: getConfig().musicCategories || '3000',
+    cat: cfg.musicCategories || '3000',
     extended: 1,
     offset: 0,
     limit: limit
   });
-  var response = await fetch(url);
+
+  var response = await fetch(searchUrl);
   var xml = await response.text();
   if (!response.ok) throw new Error(source + ' search failed with HTTP ' + response.status + '.');
-  if (/code="100"|invalid api key|authorization denied|api key/i.test(xml)) throw new Error(source + ' rejected the API request.');
+  if (/code="100"|invalid api key|authorization denied/i.test(xml)) throw new Error(source + ' rejected the API key.');
   return parseTorznabResults(xml, source);
 }
 
@@ -210,15 +265,15 @@ function scoreSearchResult(query, result) {
   return score;
 }
 
-async function searchWithFallbacks(query, limit) {
+async function searchWithFallbacks(query, limit, context) {
   var errors = [];
   try {
-    var prowlarrResults = await queryTorznabSource('prowlarr', query, limit);
+    var prowlarrResults = await queryTorznabSource('prowlarr', query, limit, context);
     var filtered = prowlarrResults.filter(function (i) { return i.magnetUrl; });
     if (filtered.length > 0) return filtered;
   } catch (e) { errors.push('Prowlarr: ' + e.message); }
   try {
-    var jackettResults = await queryTorznabSource('jackett', query, limit);
+    var jackettResults = await queryTorznabSource('jackett', query, limit, context);
     var filtered2 = jackettResults.filter(function (i) { return i.magnetUrl; });
     if (filtered2.length > 0) return filtered2;
   } catch (e) { errors.push('Jackett: ' + e.message); }
@@ -226,9 +281,14 @@ async function searchWithFallbacks(query, limit) {
   return [];
 }
 
-async function findExistingTorrentByHash(infoHash) {
+// ============================================================================
+// TORBOX TORRENT MANAGEMENT
+// ============================================================================
+
+async function findExistingTorrentByHash(infoHash, apiKey) {
   if (!infoHash) return null;
-  var torrents = await torboxFetch('/torrents/mylist?limit=' + encodeURIComponent(getConfig().maxExistingTorrentScan) + '&bypass_cache=true');
+  var cfg = getConfig();
+  var torrents = await torboxFetch('/torrents/mylist?limit=' + encodeURIComponent(cfg.maxExistingTorrentScan) + '&bypass_cache=true', {}, apiKey);
   var items = Array.isArray(torrents) ? torrents : (torrents ? [torrents] : []);
   var wantedHash = String(infoHash).toUpperCase();
   for (var i = 0; i < items.length; i++) {
@@ -253,12 +313,13 @@ function chooseBestAudioFile(files) {
   })[0];
 }
 
-async function waitForTorboxAudio(torrentId) {
+async function waitForTorboxAudio(torrentId, apiKey) {
+  var cfg = getConfig();
   var startedAt = Date.now();
-  var timeoutMs = Number(getConfig().torboxTimeoutMs) || 90000;
-  var pollMs = Number(getConfig().torboxPollIntervalMs) || 2500;
+  var timeoutMs = Number(cfg.torboxTimeoutMs) || 90000;
+  var pollMs = Number(cfg.torboxPollIntervalMs) || 2500;
   while (Date.now() - startedAt < timeoutMs) {
-    var torrent = await torboxFetch('/torrents/mylist?id=' + encodeURIComponent(torrentId) + '&bypass_cache=true');
+    var torrent = await torboxFetch('/torrents/mylist?id=' + encodeURIComponent(torrentId) + '&bypass_cache=true', {}, apiKey);
     var audioFile = chooseBestAudioFile(torrent.files);
     if (audioFile && (torrent.download_finished || torrent.cached || torrent.download_present)) {
       return { torrent: torrent, file: audioFile };
@@ -268,37 +329,76 @@ async function waitForTorboxAudio(torrentId) {
   throw new Error('Timed out waiting for TorBox to prepare the audio file.');
 }
 
-async function resolveTrackToTorbox(trackPayload) {
-  var existing = await findExistingTorrentByHash(trackPayload.infoHash);
+async function resolveTrackToTorbox(trackPayload, apiKey) {
+  var existing = await findExistingTorrentByHash(trackPayload.infoHash, apiKey);
   if (existing) {
     var existingFile = chooseBestAudioFile(existing.files);
     if (existingFile) return { torrentId: existing.id, fileId: existingFile.id, fileName: existingFile.name || existingFile.short_name || trackPayload.title };
   }
-  var created = await torboxCreateTorrent(trackPayload.magnetUrl, trackPayload.title);
-  var ready = await waitForTorboxAudio(created.torrent_id);
+  var created = await torboxCreateTorrent(trackPayload.magnetUrl, trackPayload.title, apiKey);
+  var ready = await waitForTorboxAudio(created.torrent_id, apiKey);
   return { torrentId: ready.torrent.id, fileId: ready.file.id, fileName: ready.file.name || ready.file.short_name || trackPayload.title };
 }
+
+// ============================================================================
+// MODULE EXPORT
+// ============================================================================
 
 return {
   id: MODULE_ID,
   name: 'TorBox + Prowlarr/Jackett',
-  version: '0.3.0',
-  labels: ['TORBOX', 'PROWLARR', 'JACKETT'],
-
-  settings: [
-    { key: 'torboxApiKey', type: 'password', label: 'TorBox API Key', placeholder: 'Paste your TorBox API key' },
-    { key: 'prowlarrTorznabUrl', type: 'text', label: 'Prowlarr Torznab URL', placeholder: 'http://localhost:9696/1/api' },
-    { key: 'prowlarrApiKey', type: 'password', label: 'Prowlarr API Key', placeholder: 'Paste your Prowlarr API key' },
-    { key: 'jackettTorznabUrl', type: 'text', label: 'Jackett Torznab URL', placeholder: 'http://localhost:9117/api/v2.0/indexers/all/results/torznab/api' },
-    { key: 'jackettApiKey', type: 'password', label: 'Jackett API Key', placeholder: 'Paste your Jackett API key' }
-  ],
+  version: '0.4.0',
+  labels: ['TORBOX', 'PROWLARR', 'JACKETT', 'TORRENT'],
+  supportedDebridProviders: ['torbox'],
 
   setConfig: setConfig,
   configure: setConfig,
+  verifyTorBoxKey: verifyTorBoxKey,
 
-  searchTracks: async function (query, limit) {
+  settings: {
+    torboxApiKey: {
+      type: 'debrid',
+      label: 'TorBox Connection',
+      description: 'Enter your TorBox API key to add torrents to your cloud. Get your key at torbox.app',
+      provider: 'torbox',
+      providerName: 'TorBox',
+      providerLogo: TORBOX_LOGO,
+      placeholder: 'Paste TorBox API Key...',
+      verifyAction: 'verifyTorBoxKey'
+    },
+    prowlarrTorznabUrl: {
+      type: 'text',
+      label: 'Prowlarr URL',
+      description: 'Your Prowlarr instance URL (e.g., http://localhost:9696)',
+      placeholder: 'http://localhost:9696',
+      defaultValue: ''
+    },
+    prowlarrApiKey: {
+      type: 'text',
+      label: 'Prowlarr API Key',
+      description: 'API key from Prowlarr Settings > General',
+      placeholder: 'Enter Prowlarr API Key...',
+      defaultValue: ''
+    },
+    jackettTorznabUrl: {
+      type: 'text',
+      label: 'Jackett Torznab URL',
+      description: 'Full Torznab endpoint from Jackett (fallback)',
+      placeholder: 'http://localhost:9117/api/v2.0/indexers/all/results/torznab/api',
+      defaultValue: ''
+    },
+    jackettApiKey: {
+      type: 'text',
+      label: 'Jackett API Key',
+      description: 'API key from Jackett dashboard',
+      placeholder: 'Enter Jackett API Key...',
+      defaultValue: ''
+    }
+  },
+
+  searchTracks: async function (query, limit, context) {
     var resolvedLimit = Number(limit || getConfig().searchLimit || 20);
-    var results = await searchWithFallbacks(query, resolvedLimit);
+    var results = await searchWithFallbacks(query, resolvedLimit, context);
     var tracks = results
       .map(function (result) {
         var parsed = parseTitleGuess(result.title);
@@ -320,15 +420,18 @@ return {
     return { tracks: tracks, total: tracks.length };
   },
 
-  getTrackStreamUrl: async function (trackId, quality) {
+  getTrackStreamUrl: async function (trackId, quality, context) {
+    var apiKey = getKey(context);
+    if (!apiKey) throw new Error('TorBox API key is missing.');
     var payload = typeof trackId === 'string' ? JSON.parse(trackId) : trackId;
-    var resolved = await resolveTrackToTorbox(payload);
-    var apiKey = ensureTorboxApiKey();
+    var resolved = await resolveTrackToTorbox(payload, apiKey);
     var streamUrl = await torboxFetch(
       '/torrents/requestdl?token=' + encodeURIComponent(apiKey) +
       '&torrent_id=' + encodeURIComponent(resolved.torrentId) +
       '&file_id=' + encodeURIComponent(resolved.fileId) +
-      '&redirect=false&append_name=true'
+      '&redirect=false&append_name=true',
+      {},
+      apiKey
     );
     return {
       streamUrl: streamUrl,

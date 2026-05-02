@@ -1,0 +1,36 @@
+{
+  "category:debrid_modules": [
+    {
+      "id": "torbox-torznab",
+      "name": "TorBox + Prowlarr/Jackett",
+      "pkg": "com.8spine.module.torbox.torznab",
+      "file": "8spine-torbox-module.js",
+      "download": "8spine-torbox-module.js",
+      "version": "v0.4.0",
+      "code": 400,
+      "type": "MODULE",
+      "author": "nvmindl",
+      "description": "Search music via Prowlarr (Jackett fallback) and stream through TorBox",
+      "tags": [
+        "TORBOX",
+        "PROWLARR",
+        "JACKETT",
+        "TORRENT",
+        "MUSIC"
+      ],
+      "featured": false,
+      "trusted": true,
+      "nsfw": false,
+      "lang": "all",
+      "folder": ".",
+      "sources": [
+        {
+          "name": "TorBox + Prowlarr/Jackett",
+          "lang": "all",
+          "id": "torbox-torznab",
+          "baseUrl": "."
+        }
+      ]
+    }
+  ]
+}
