@@ -106,22 +106,47 @@ function parseXml(xml, source) {
   }).filter(function(t) { return t !== null; });
 }
 
+async function searchLidarr(query, limit, ctx) {
+  var url = gs(ctx, 'lidarrUrl').replace(/\/+$/, '');
+  var key = gs(ctx, 'lidarrApiKey');
+  if (!url || !key) throw new Error('Lidarr not configured');
+  var r = await fetch(url + '/api/v1/album/lookup?term=' + encodeURIComponent(query), { headers: { 'X-Api-Key': key } });
+  if (!r.ok) throw new Error('Lidarr HTTP ' + r.status);
+  var albums = await r.json();
+  if (!Array.isArray(albums) || !albums.length) return [];
+  return albums.slice(0, limit || 20).map(function(album) {
+    var artist = (album.artist && album.artist.artistName) || 'Unknown Artist';
+    return {
+      id: JSON.stringify({ type:'lidarr', artist: artist, album: album.title || '' }),
+      title: album.title || 'Unknown',
+      artist: artist,
+      album: '',
+      duration: 0,
+      albumCover: ''
+    };
+  });
+}
+
 async function searchTracks(query, limit, ctx) {
   var lim = Number(limit || 20);
-  // 1. TorBox usenet (primary - everything through TorBox)
+  // 1. Lidarr (best metadata + album art, if configured)
+  if (gs(ctx, 'lidarrUrl') && gs(ctx, 'lidarrApiKey')) {
+    try { var lr = await searchLidarr(query, lim, ctx); if (lr.length) return { tracks: lr.slice(0, lim), total: lr.length }; } catch(e) { console.warn('[TorBox] Lidarr:', e.message); }
+  }
+  // 2. TorBox usenet
   try {
     var ub = await searchTorboxUsenet(query, lim, ctx);
     if (ub.length) return { tracks: ub.slice(0, lim), total: ub.length };
   } catch(e) { console.warn('[TorBox] Usenet:', e.message); }
-  // 2. Prowlarr (optional, if configured)
+  // 3. Prowlarr (optional)
   if (gs(ctx, 'prowlarrTorznabUrl')) {
     try { var pr = await searchProwlarr(query, lim, ctx); if (pr.length) return { tracks: pr.slice(0, lim), total: pr.length }; } catch(e) { console.warn('[TorBox] Prowlarr:', e.message); }
   }
-  // 3. Jackett (optional, if configured)
+  // 4. Jackett (optional)
   if (gs(ctx, 'jackettTorznabUrl')) {
     try { var jr = await searchJackett(query, lim, ctx); if (jr.length) return { tracks: jr.slice(0, lim), total: jr.length }; } catch(e) { console.warn('[TorBox] Jackett:', e.message); }
   }
-  // 4. TPB (last resort fallback, torrents still streamed via TorBox)
+  // 5. TPB (last resort)
   var tr = await searchTPB(query, lim);
   return { tracks: tr.slice(0, lim), total: tr.length };
 }
@@ -196,6 +221,26 @@ async function getTrackStreamUrl(trackId, quality, ctx) {
   if (!apiKey) throw new Error('TorBox API key is missing.');
   var payload = typeof trackId === 'string' ? JSON.parse(trackId) : trackId;
 
+  if (payload.type === 'lidarr') {
+    // Auto-find via TorBox usenet then TPB
+    var q = payload.artist + ' ' + payload.album;
+    try {
+      var usenetHits = await searchTorboxUsenet(q, 3, ctx);
+      if (usenetHits.length) {
+        var up = JSON.parse(usenetHits[0].id);
+        var addedU = await addUsenet(up.hash, up.nzb, up.title, apiKey);
+        var uid = addedU.usenetdownload_id || addedU.id;
+        var rdyU = await waitForUsenet(uid, apiKey);
+        var suU = await tbFetch('/usenet/requestdl?token=' + encodeURIComponent(apiKey) + '&usenet_id=' + encodeURIComponent(uid) + '&file_id=' + encodeURIComponent(rdyU.file.id) + '&redirect=false', apiKey, {});
+        return { streamUrl: suU, track: { id: trackId, audioQuality: inferQ(rdyU.file.name||'') } };
+      }
+    } catch(e) { console.warn('[TorBox] Lidarr usenet stream:', e.message); }
+    var tpbHits = await searchTPB(q, 3);
+    if (!tpbHits.length) throw new Error('No results found for: ' + q);
+    payload = JSON.parse(tpbHits[0].id);
+    // fall through to torrent path below
+  }
+
   if (payload.type === 'usenet') {
     var added = await addUsenet(payload.hash, payload.nzb, payload.title, apiKey);
     var usenetId = added.usenetdownload_id || added.id;
@@ -217,14 +262,16 @@ async function getTrackStreamUrl(trackId, quality, ctx) {
 }
 
 return {
-  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.9.0',
-  labels: ['TORBOX','TORRENT','PROWLARR','JACKETT'],
+  id: MODULE_ID, name: 'TorBox + Lidarr/Prowlarr', version: '1.0.0',
+  labels: ['TORBOX','LIDARR','PROWLARR','JACKETT'],
   supportedDebridProviders: ['torbox'],
   verifyTorBoxKey: verifyTorBoxKey,
   searchTracks: searchTracks,
   getTrackStreamUrl: getTrackStreamUrl,
   settings: {
     torboxApiKey: { type:'debrid', label:'TorBox Connection', description:'Enter your TorBox API key. Get yours at torbox.app', provider:'torbox', providerName:'TorBox', providerLogo: TORBOX_LOGO, placeholder:'Paste TorBox API Key...', verifyAction:'verifyTorBoxKey' },
+    lidarrUrl: { type:'text', label:'Lidarr URL', description:'Your Lidarr instance URL. Enables rich metadata + album art in search results.', placeholder:'http://localhost:8686', defaultValue:'' },
+    lidarrApiKey: { type:'text', label:'Lidarr API Key', description:'From Lidarr Settings > General', placeholder:'Enter Lidarr API Key...', defaultValue:'' },
     prowlarrTorznabUrl: { type:'text', label:'Prowlarr URL', description:'Optional. e.g. http://localhost:9696/1/api', placeholder:'http://localhost:9696/1/api', defaultValue:'' },
     prowlarrApiKey: { type:'text', label:'Prowlarr API Key', description:'Optional. From Prowlarr Settings > General', placeholder:'Enter Prowlarr API Key...', defaultValue:'' },
     jackettTorznabUrl: { type:'text', label:'Jackett Torznab URL', description:'Optional. Fallback search source', placeholder:'http://localhost:9117/api/v2.0/indexers/all/results/torznab/api', defaultValue:'' },
