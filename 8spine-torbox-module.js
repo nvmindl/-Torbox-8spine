@@ -71,7 +71,7 @@ async function searchJackett(query, limit, ctx) {
 async function searchTorboxUsenet(query, limit, ctx) {
   var apiKey = getKey(ctx);
   if (!apiKey) throw new Error('TorBox key required');
-  var url = TORBOX_SEARCH_API + '/usenet/search/' + encodeURIComponent(query) + '?check_cache=true&check_owned=true';
+  var url = TORBOX_SEARCH_API + '/usenet/search/' + encodeURIComponent(query) + '?limit=' + (limit || 20);
   var r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + apiKey } });
   if (!r.ok) throw new Error('TorBox usenet search HTTP ' + r.status);
   var json = await r.json();
@@ -108,18 +108,22 @@ function parseXml(xml, source) {
 
 async function searchTracks(query, limit, ctx) {
   var lim = Number(limit || 20);
+  // 1. TorBox usenet (primary - everything through TorBox)
+  try {
+    var ub = await searchTorboxUsenet(query, lim, ctx);
+    if (ub.length) return { tracks: ub.slice(0, lim), total: ub.length };
+  } catch(e) { console.warn('[TorBox] Usenet:', e.message); }
+  // 2. Prowlarr (optional, if configured)
   if (gs(ctx, 'prowlarrTorznabUrl')) {
     try { var pr = await searchProwlarr(query, lim, ctx); if (pr.length) return { tracks: pr.slice(0, lim), total: pr.length }; } catch(e) { console.warn('[TorBox] Prowlarr:', e.message); }
   }
+  // 3. Jackett (optional, if configured)
   if (gs(ctx, 'jackettTorznabUrl')) {
     try { var jr = await searchJackett(query, lim, ctx); if (jr.length) return { tracks: jr.slice(0, lim), total: jr.length }; } catch(e) { console.warn('[TorBox] Jackett:', e.message); }
   }
-  try {
-    var tr = await searchTPB(query, lim);
-    if (tr.length) return { tracks: tr.slice(0, lim), total: tr.length };
-  } catch(e) { console.warn('[TorBox] TPB:', e.message); }
-  var ub = await searchTorboxUsenet(query, lim, ctx);
-  return { tracks: ub.slice(0, lim), total: ub.length };
+  // 4. TPB (last resort fallback, torrents still streamed via TorBox)
+  var tr = await searchTPB(query, lim);
+  return { tracks: tr.slice(0, lim), total: tr.length };
 }
 
 async function tbFetch(path, apiKey, opts) {
@@ -213,7 +217,7 @@ async function getTrackStreamUrl(trackId, quality, ctx) {
 }
 
 return {
-  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.8.0',
+  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.9.0',
   labels: ['TORBOX','TORRENT','PROWLARR','JACKETT'],
   supportedDebridProviders: ['torbox'],
   verifyTorBoxKey: verifyTorBoxKey,
