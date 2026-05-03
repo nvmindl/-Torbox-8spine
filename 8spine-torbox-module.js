@@ -60,7 +60,7 @@ async function searchJackett(query, limit, ctx) {
 async function searchTorboxApi(query, limit, ctx) {
   var apiKey = getKey(ctx);
   if (!apiKey) throw new Error('TorBox key required for search');
-  var url = TORBOX_SEARCH_API + '/torrent/search/' + encodeURIComponent(query) + '?limit=' + (limit || 20);
+  var url = TORBOX_SEARCH_API + '/torrents/search/' + encodeURIComponent(query) + '?limit=' + (limit || 20);
   var r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + apiKey } });
   if (!r.ok) throw new Error('TorBox search HTTP ' + r.status);
   var json = await r.json();
@@ -175,7 +175,7 @@ async function getTrackStreamUrl(trackId, quality, ctx) {
 }
 
 return {
-  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.6.2',
+  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.6.3',
   labels: ['TORBOX','TORRENT','PROWLARR','JACKETT'],
   supportedDebridProviders: ['torbox'],
   verifyTorBoxKey: verifyTorBoxKey,
