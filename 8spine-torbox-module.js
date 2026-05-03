@@ -64,10 +64,10 @@ function xmlAttr(xml, attr) {
   var m = xml.match(new RegExp('<(?:torznab|newznab):attr[^>]*name="' + attr + '"[^>]*value="([^"]*)"','i'));
   return m ? m[1].trim() : '';
 }
-function xmlEnc(xml) { var m = xml.match(/<enclosure[^>]*url="([^"]+)"/i); return m ? m[1].trim() : ''; }
+function xmlEnc(xml) { var m = xml.match(new RegExp('<enclosure[^>]*url="([^"]+)"', 'i')); return m ? m[1].trim() : ''; }
 
 function parseXml(xml, source) {
-  var items = xml.match(/<item[^]*?<\/item>/gi) || [];
+  var items = xml.match(new RegExp('<item[^]*?<' + '/item>', 'gi')) || [];
   return items.map(function(itemXml) {
     var title = xmlField(itemXml, 'title');
     var link = xmlField(itemXml, 'link');
