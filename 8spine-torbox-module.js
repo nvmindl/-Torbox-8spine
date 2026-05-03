@@ -175,7 +175,7 @@ async function getTrackStreamUrl(trackId, quality, ctx) {
 }
 
 return {
-  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.6.0',
+  id: MODULE_ID, name: 'TorBox + Prowlarr/Jackett', version: '0.6.2',
   labels: ['TORBOX','TORRENT','PROWLARR','JACKETT'],
   supportedDebridProviders: ['torbox'],
   verifyTorBoxKey: verifyTorBoxKey,
